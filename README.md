@@ -1,4 +1,2 @@
-# tri-sensor
-Sensor for measuring temperature/humidity/light and logging via MQTT
-
-This project requires the following Arduino modules:
+# Coop Assistant
+An ESPHome based automatic chicken coop door with Home Assistant support
