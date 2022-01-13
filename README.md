@@ -1,2 +1,4 @@
-# coop-assistant
-An arduino project for chicken coop automation with Home Assistant integration
+# tri-sensor
+Sensor for measuring temperature/humidity/light and logging via MQTT
+
+This project requires the following Arduino modules:
