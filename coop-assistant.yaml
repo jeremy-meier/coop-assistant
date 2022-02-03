@@ -1,0 +1,308 @@
+# D0/GPIO16 - Push Button Stop
+# D1/GPIO5  - I2C SCL
+# D2/GPIO4  - I2C SDA
+# D3/GPIO0  - Push Button Up
+# D4/GPIO2  - Coop Light PWM
+# D5/GPIO14 - DHT Sensor
+# D6/GPIO12 - Main Door
+# D7/GPIO13 - Nesting Box Lid
+# D8/GPIO15 - Motor PWM
+# RX/GPIO3  - Push Button Down
+# TX/GPIO1  - Motor Drive Enable
+
+esphome:
+  name: coop-assistant
+  platform: ESP8266
+  board: nodemcuv2
+  esp8266_restore_from_flash: true
+  
+  includes:
+    - veml7700_sensor.h
+  
+  libraries:
+    - "Wire"
+    - "SPI"
+    - "Adafruit BusIO"
+    - "Adafruit VEML7700 Library"
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    mqtt.component: DEBUG
+    mqtt.client: INFO
+
+# Enable Home Assistant API
+api:
+
+ota:
+  password: !secret ota_pass 
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_pass
+  use_address: 10.0.101.92
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Coop-Assistant Fallback Hotspot"
+    password: !secret ap_pass
+
+captive_portal:
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  scan: false
+  
+ads1115:
+  - address: 0x48
+  
+globals:
+  - id: error_code
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: door_status
+    # 0 - unknown
+    # 1 - open
+    # 2 - closed
+    # 3 - closing
+    # 4 - opening
+    # 5 - stopped
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: illuminance_overrun
+    type: int
+    restore_value: no
+    initial_value: "25"
+    
+time:
+  - platform: sntp
+    timezone: "America/Chicago"
+    on_time_sync:
+      then:
+        - logger.log: "Synchronized system clock"
+
+binary_sensor:
+  - platform: status
+    name: "Coop Assistant Connectivity"
+    
+  - platform: gpio
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pullup: true
+    name: "Main Door"
+    device_class: door
+    
+  - platform: gpio
+    pin:
+      number: GPIO13
+      mode:
+        input: true
+        pullup: true
+    name: "Nesting Box Lid"
+    device_class: door
+
+  - platform: template
+    name: "Coop Assistant Status"
+    device_class: "problem"
+    lambda: |-
+      if (id(error_code) > 0) {
+        // Some error was detected
+        // ESP_LOGD("problem", "Error was greater than zero. %d", id(error_code));
+        return true;
+      } else {
+        // No errors, carry on!
+        // ESP_LOGD("problem", "Error was not greater than zero.");
+        return false;
+      }
+
+  - platform: gpio
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+    id: button_stop
+    
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: button_open
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+    on_press:
+      then:
+        - logger.log: "Open button was pressed"
+        - cover.open: chicken_door
+    
+  - platform: gpio
+    pin:
+      number: GPIO3
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: button_close
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+    on_press:
+      then:
+        - logger.log: "Close button was pressed"
+        - cover.close: chicken_door
+
+sensor:
+  - platform: dht
+    pin: GPIO14
+    model: DHT22_TYPE2
+    temperature:
+      name: "Coop Temperature"
+      id: "temperature"
+    humidity:
+      name: "Coop Humidity"
+      id: "humidity"
+    update_interval: 60s
+  
+  - platform: custom
+    lambda: |-
+      auto veml7700 = new VEML7700Sensor();
+      App.register_component(veml7700);
+      return {veml7700->lux_sensor, veml7700->white_sensor, veml7700->als_sensor};
+    sensors:
+    - name: "Coop Illuminance"
+      unit_of_measurement: Lux
+      accuracy_decimals: 0
+    - name: "Coop Illuminance (White)"
+      unit_of_measurement: raw
+      accuracy_decimals: 0
+      internal: true
+    - name: "Coop Illuminance (ALS)"
+      unit_of_measurement: raw
+      accuracy_decimals: 0
+      internal: true
+          
+  - platform: ads1115
+    multiplexer: 'A0_GND'
+    gain: 4.096
+    id: "ads1115_ch0"
+    update_interval: 5s
+    
+  - platform: ads1115
+    multiplexer: 'A1_GND'
+    gain: 4.096
+    id: "ads1115_ch1"
+    update_interval: 5s
+      
+output:
+  - platform: esp8266_pwm
+    pin: GPIO2
+    frequency: 100 Hz
+    inverted: true
+    id: light_pwm
+
+  - platform: esp8266_pwm
+    pin: 
+      number: GPIO15
+      mode:
+        output: true
+    frequency: 10000 Hz
+    id: motor_pwm
+    
+  - platform: gpio
+    pin:
+      number: GPIO1
+      mode: 
+        output: true
+    id: motor_drive_enable
+
+light:
+  - platform: monochromatic
+    output: light_pwm
+    name: "Coop Light"
+    id: "coop_light"
+    
+select:
+  - platform: template
+    name: "Door Mode"
+    id: "door_mode"
+    options:
+      - manual
+      - automatic
+    initial_option: manual
+    restore_value: true
+    optimistic: true
+
+number:
+  - platform: template
+    name: "Door Set Point"
+    id: "door_set_point"
+    restore_value: true
+    optimistic: true
+    min_value: 0
+    max_value: 1000
+    step: 1
+
+cover:
+  - platform: current_based
+    name: "Chicken Door"
+    device_class: "door"
+    id: "chicken_door"
+    open_sensor: ads1115_ch0
+    open_action:
+      - logger.log: "Release those cluckers!!!"
+      - output.set_level:
+          id: motor_pwm
+          level: 25%
+      - output.turn_on: motor_drive_enable
+    open_duration: 30s
+    open_moving_current_threshold: 1.0
+    open_obstacle_current_threshold: 2.0
+    close_sensor: ads1115_ch1
+    close_action:
+      - logger.log: "Bed time for the nuggets!!!"
+      - output.set_level:
+          id: motor_pwm
+          level: 75%
+      - output.turn_on: motor_drive_enable
+    close_duration: 30s
+    close_moving_current_threshold: 1.0
+    close_obstacle_current_threshold: 2.0
+    stop_action:
+      - output.set_level:
+          id: motor_pwm
+          level: 50%
+      - output.turn_off: motor_drive_enable
+    max_duration: 180s
+    start_sensing_delay: 1s
+    
+# Update the countdown timers every 5 seconds.
+interval:
+  - interval: 10s
+    then:
+      - logger.log: "Loopy loop"
+      - logger.log: 
+          format: "door_mode: %s"
+          args: [id(door_mode).state.c_str()]
+      - logger.log: 
+          format: "door_set_point: %.0f"
+          args: [id(door_set_point).state]
+          
+# script:
+#   - id: open_door
+#     then:
+#       - logger.log: "Open the door"
+#   -id: close_door
+#     then:
+#       - logger.log: "Close the door"
+
