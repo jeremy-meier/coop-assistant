@@ -23,14 +23,14 @@ esphome:
     - "Wire"
     - "SPI"
     - "Adafruit BusIO"
-    - "Adafruit VEML7700 Library"
+    - "https://github.com/MojaveTom/Adafruit_VEML7700"
 
 # Enable logging
 logger:
-  level: DEBUG
-  logs:
-    mqtt.component: DEBUG
-    mqtt.client: INFO
+  level: INFO
+  # logs:
+  #   ads1115: INFO
+  #   sensor: INFO
 
 # Enable Home Assistant API
 api:
@@ -41,7 +41,7 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_pass
-  use_address: 10.0.101.92
+  use_address: 10.0.101.91
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
@@ -59,26 +59,15 @@ ads1115:
   - address: 0x48
   
 globals:
-  - id: error_code
-    type: int
-    restore_value: no
-    initial_value: "0"
-
-  - id: door_status
-    # 0 - unknown
-    # 1 - open
-    # 2 - closed
-    # 3 - closing
-    # 4 - opening
-    # 5 - stopped
-    type: int
-    restore_value: no
-    initial_value: "0"
-
-  - id: illuminance_overrun
-    type: int
-    restore_value: no
-    initial_value: "25"
+  - id: auto_open_armed
+    type: boolean
+    restore_value: yes
+    initial_value: "false"
+    
+  - id: auto_close_armed
+    type: boolean
+    restore_value: yes
+    initial_value: "false"
     
 time:
   - platform: sntp
@@ -86,6 +75,59 @@ time:
     on_time_sync:
       then:
         - logger.log: "Synchronized system clock"
+    
+    on_time:
+      # If automatic door opening is configured, arm it at 6am 
+      - seconds: 0
+        minutes: 0
+        hours: 6
+        then:
+          - lambda: |-
+              if (strcmp(id(door_mode).state.c_str(),"automatic")) {
+                ESP_LOGD("auto_open", "Auto open door armed!");
+                id(auto_open_armed) = true;
+              }
+              
+      # If automatic door opening is configured, confirm at 8am if it actually opened
+      - seconds: 0
+        minutes: 0
+        hours: 8
+        then:
+          - lambda: |-
+              if (strcmp(id(door_mode).state.c_str(),"automatic") && id(auto_open_armed) == true) {
+                ESP_LOGD("auto_open", "Auto open door failed to open by 8am.  Opening manually");
+                id(auto_open_armed) = false;
+                
+                auto call = id(chicken_door).make_call();
+                call.set_command_open();
+                call.perform();
+              }
+              
+      # If automatic door closing is configured, arm it at 5 pm
+      - seconds: 0
+        minutes: 0
+        hours: 17
+        then:
+          - lambda: |-
+              if (strcmp(id(door_mode).state.c_str(),"automatic")) {
+                ESP_LOGD("auto_close", "Auto close door armed!");
+                id(auto_close_armed) = true;
+              }
+
+      # If automatic door closing is configured, confirm at 9pm if it actually closed
+      - seconds: 0
+        minutes: 0
+        hours: 21
+        then:
+          - lambda: |-
+              if (strcmp(id(door_mode).state.c_str(),"automatic") && id(auto_close_armed) == true) {
+                ESP_LOGD("auto_close", "Auto close door failed to close by 9am.");
+                id(auto_close_armed) = false;
+                
+                auto call = id(chicken_door).make_call();
+                call.set_command_close();
+                call.perform();
+              }
 
 binary_sensor:
   - platform: status
@@ -109,26 +151,19 @@ binary_sensor:
     name: "Nesting Box Lid"
     device_class: door
 
-  - platform: template
-    name: "Coop Assistant Status"
-    device_class: "problem"
-    lambda: |-
-      if (id(error_code) > 0) {
-        // Some error was detected
-        // ESP_LOGD("problem", "Error was greater than zero. %d", id(error_code));
-        return true;
-      } else {
-        // No errors, carry on!
-        // ESP_LOGD("problem", "Error was not greater than zero.");
-        return false;
-      }
-
   - platform: gpio
     pin:
       number: GPIO16
       mode:
         input: true
     id: button_stop
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+    on_press:
+      then:
+        - logger.log: "Stop button was pressed"
+        - cover.stop: chicken_door
     
   - platform: gpio
     pin:
@@ -178,15 +213,12 @@ sensor:
     lambda: |-
       auto veml7700 = new VEML7700Sensor();
       App.register_component(veml7700);
-      return {veml7700->lux_sensor, veml7700->white_sensor, veml7700->als_sensor};
+      return {veml7700->lux_sensor, veml7700->als_sensor};
     sensors:
     - name: "Coop Illuminance"
+      id: 'illuminance'
       unit_of_measurement: Lux
-      accuracy_decimals: 0
-    - name: "Coop Illuminance (White)"
-      unit_of_measurement: raw
-      accuracy_decimals: 0
-      internal: true
+      accuracy_decimals: 1
     - name: "Coop Illuminance (ALS)"
       unit_of_measurement: raw
       accuracy_decimals: 0
@@ -194,15 +226,15 @@ sensor:
           
   - platform: ads1115
     multiplexer: 'A0_GND'
-    gain: 4.096
+    gain: 0.256
     id: "ads1115_ch0"
-    update_interval: 5s
+    update_interval: 1s
     
   - platform: ads1115
     multiplexer: 'A1_GND'
-    gain: 4.096
+    gain: 0.256
     id: "ads1115_ch1"
-    update_interval: 5s
+    update_interval: 1s
       
 output:
   - platform: esp8266_pwm
@@ -258,51 +290,86 @@ cover:
     name: "Chicken Door"
     device_class: "door"
     id: "chicken_door"
-    open_sensor: ads1115_ch0
+    open_sensor: ads1115_ch1
     open_action:
       - logger.log: "Release those cluckers!!!"
       - output.set_level:
           id: motor_pwm
-          level: 25%
+          level: 20%
       - output.turn_on: motor_drive_enable
-    open_duration: 30s
-    open_moving_current_threshold: 1.0
-    open_obstacle_current_threshold: 2.0
-    close_sensor: ads1115_ch1
+    open_duration: 50s
+    open_moving_current_threshold: 0.015
+    open_obstacle_current_threshold: 0.060
+    on_open:
+      - homeassistant.event:
+          event: esphome.coop_assistant_door
+          data:
+            status: Door Opened
+    close_sensor: ads1115_ch0
     close_action:
       - logger.log: "Bed time for the nuggets!!!"
       - output.set_level:
           id: motor_pwm
-          level: 75%
+          level: 80%
       - output.turn_on: motor_drive_enable
-    close_duration: 30s
-    close_moving_current_threshold: 1.0
-    close_obstacle_current_threshold: 2.0
+    close_duration: 50s
+    close_moving_current_threshold: 0.015
+    close_obstacle_current_threshold: 0.060
+    on_closed:
+      - homeassistant.event:
+          event: esphome.coop_assistant_door
+          data:
+            status: Door Closed
     stop_action:
       - output.set_level:
           id: motor_pwm
           level: 50%
       - output.turn_off: motor_drive_enable
     max_duration: 180s
-    start_sensing_delay: 1s
+    start_sensing_delay: 5s
     
-# Update the countdown timers every 5 seconds.
+# Each minute, run checks for automatic door open/close
 interval:
-  - interval: 10s
+  - interval: 60s
     then:
-      - logger.log: "Loopy loop"
-      - logger.log: 
-          format: "door_mode: %s"
-          args: [id(door_mode).state.c_str()]
-      - logger.log: 
-          format: "door_set_point: %.0f"
-          args: [id(door_set_point).state]
-          
-# script:
-#   - id: open_door
-#     then:
-#       - logger.log: "Open the door"
-#   -id: close_door
-#     then:
-#       - logger.log: "Close the door"
+      if:
+        condition:
+          and:
+            - lambda: |-
+                return id(door_mode).state == "automatic";
+            - lambda: |-
+                return id(auto_open_armed);
+            - lambda: |-
+                return id(illuminance).state > id(door_set_point).state;
+        then:
+          - globals.set:
+              id: auto_open_armed
+              value: 'false'
+          - homeassistant.event:
+              event: esphome.coop_assistant_door
+              data:
+                status: Armed door opened
+          - cover.open: chicken_door
+          - logger.log: "Armed door was automatically opened."
 
+  - interval: 60s
+    then:
+      if:
+        condition:
+          and:
+            - lambda: |-
+                return id(door_mode).state == "automatic";
+            - lambda: |-
+                return id(auto_close_armed);
+            - lambda: |-
+                return id(illuminance).state < id(door_set_point).state;
+        then:
+          - globals.set:
+              id: auto_close_armed
+              value: 'false'
+          - homeassistant.event:
+              event: esphome.coop_assistant_door
+              data:
+                status: Armed door closed
+          - cover.close: chicken_door
+          - logger.log: "Armed door was automatically closed."

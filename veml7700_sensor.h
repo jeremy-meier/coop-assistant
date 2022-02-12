@@ -3,36 +3,50 @@
 
 class VEML7700Sensor : public PollingComponent, public Sensor {
     public:
-    Adafruit_VEML7700 veml = Adafruit_VEML7700();
+    Adafruit_VEML7700 veml = Adafruit_VEML7700(4096, 32768);
 
     Sensor *lux_sensor = new Sensor();
-    Sensor *white_sensor = new Sensor();
     Sensor *als_sensor = new Sensor();
 
-    VEML7700Sensor() : PollingComponent(5000) {}
+    VEML7700Sensor() : PollingComponent(15000) {}
 
     void setup() override {
         Wire.begin();
         veml.begin();
-        ESP_LOGD("VEML7700", "Setting Up VEML7700 Sensor");
+        veml.enable(false);
         veml.setGain(VEML7700_GAIN_1);
-        veml.setIntegrationTime(VEML7700_IT_800MS);
-        // veml.powerSaveEnable(true);
-        // veml.setPowerSaveMode(VEML7700_POWERSAVE_MODE4);
-        // veml.setLowThreshold(10000);
-        // veml.setHighThreshold(20000);
-        // veml.interruptEnable(true);
+        veml.setIntegrationTime(VEML7700_IT_100MS);
+        ESP_LOGD("VEML7700", "Initial setup complete, Gain=1, IntegtationTime=100ms");
+        veml.enable(true);
     }
 
     void update() override {
-        float lux = veml.readLux();
-        float white = veml.readWhite();
-        float als = veml.readALS();
-        ESP_LOGD("VEML7700", "The value of sensor lux is: %.0f", lux);
-        ESP_LOGD("VEML7700", "The value of sensor white is: %.0f", white);
-        ESP_LOGD("VEML7700", "The value of sensor ALS is: %.0f", als);
+        uint16_t raw = veml.readALS();
+        ESP_LOGD("VEML7700", "Initial ALS reading: %u", raw);
+        ESP_LOGD("VEML7700", "Initial gain value = %.3f", veml.getGainValue());
+        ESP_LOGD("VEML7700", "Initial integration time factor = %.3f", veml.getIntegrationTimeFactor());
+
+        // Determine whether gain/integtation time can be optimized to improve measurement
+        bool optimalParams = !veml.optimizeParams(raw);
+
+        // if optimization is indicated, wait for refresh time, take a new measurement,
+        // then check if further optimization is possible.
+        while (!optimalParams) {
+            ESP_LOGD("VEML7700", "VEML parameters RE-optimized.");
+            ESP_LOGD("VEML7700", "Now using gain = %.3f", veml.getGainValue());
+            ESP_LOGD("VEML7700", "Now using integration time factor = %.3f", veml.getIntegrationTimeFactor());
+            delay(veml.getRefreshTime());
+            raw = veml.readALS();
+            ESP_LOGD("VEML7700", "Updated ALS reading: %d", raw);
+            optimalParams = !veml.optimizeParams(raw);
+        }
+
+        float lux = veml.convertToLux(raw);
+
+        ESP_LOGD("VEML7700", "The value of sensor ALS is: %u", raw);
+        ESP_LOGD("VEML7700", "The value of sensor lux is: %.2f", lux);
+
         lux_sensor->publish_state(lux);
-        white_sensor->publish_state(white);
-        als_sensor->publish_state(als);
+        als_sensor->publish_state(raw);
     }
 };
