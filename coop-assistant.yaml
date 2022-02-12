@@ -27,13 +27,29 @@ esphome:
 
 # Enable logging
 logger:
-  level: INFO
-  # logs:
-  #   ads1115: INFO
-  #   sensor: INFO
+  level: DEBUG
+  logs:
+    ads1115: INFO
+    sensor: INFO
 
 # Enable Home Assistant API
 api:
+  services:
+    - service: set_auto_open_arm
+      then:
+        - script.execute: auto_open_arm
+        
+    - service: set_auto_open_disarm
+      then:
+        - script.execute: auto_open_disarm
+
+    - service: set_auto_close_arm
+      then:
+        - script.execute: auto_close_arm
+        
+    - service: set_auto_close_disarm
+      then:
+        - script.execute: auto_close_disarm
 
 ota:
   password: !secret ota_pass 
@@ -82,52 +98,60 @@ time:
         minutes: 0
         hours: 6
         then:
-          - lambda: |-
-              if (strcmp(id(door_mode).state.c_str(),"automatic")) {
-                ESP_LOGD("auto_open", "Auto open door armed!");
-                id(auto_open_armed) = true;
-              }
+          - if:
+              condition:
+                lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+              then:
+                - script.execute: auto_open_arm
               
       # If automatic door opening is configured, confirm at 8am if it actually opened
       - seconds: 0
         minutes: 0
         hours: 8
         then:
-          - lambda: |-
-              if (strcmp(id(door_mode).state.c_str(),"automatic") && id(auto_open_armed) == true) {
-                ESP_LOGD("auto_open", "Auto open door failed to open by 8am.  Opening manually");
-                id(auto_open_armed) = false;
-                
-                auto call = id(chicken_door).make_call();
-                call.set_command_open();
-                call.perform();
-              }
+          - if:
+              condition:
+                and:
+                  - lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+                  - lambda: 'return id(auto_open_armed) == true;'
+              then:
+                - script.execute: auto_open_disarm
+                - logger.log: 'Open Armed Door (Timeout)'
+                - homeassistant.event:
+                    event: esphome.coop_assistant_automatic_door
+                    data:
+                      status: 'Open Armed Door (Timeout)'
+                - cover.open: chicken_door
               
       # If automatic door closing is configured, arm it at 5 pm
       - seconds: 0
         minutes: 0
         hours: 17
         then:
-          - lambda: |-
-              if (strcmp(id(door_mode).state.c_str(),"automatic")) {
-                ESP_LOGD("auto_close", "Auto close door armed!");
-                id(auto_close_armed) = true;
-              }
+          - if:
+              condition:
+                lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+              then:
+                - script.execute: auto_close_arm
 
       # If automatic door closing is configured, confirm at 9pm if it actually closed
       - seconds: 0
         minutes: 0
         hours: 21
         then:
-          - lambda: |-
-              if (strcmp(id(door_mode).state.c_str(),"automatic") && id(auto_close_armed) == true) {
-                ESP_LOGD("auto_close", "Auto close door failed to close by 9am.");
-                id(auto_close_armed) = false;
-                
-                auto call = id(chicken_door).make_call();
-                call.set_command_close();
-                call.perform();
-              }
+          - if:
+              condition:
+                and:
+                  - lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+                  - lambda: 'return id(auto_close_armed) == true;'
+              then:
+                - script.execute: auto_close_disarm
+                - logger.log: 'Close Armed Door (Timeout)'
+                - homeassistant.event:
+                    event: esphome.coop_assistant_automatic_door
+                    data:
+                      status: 'Close Armed Door (Timeout)'
+                - cover.close: chicken_door        
 
 binary_sensor:
   - platform: status
@@ -274,6 +298,12 @@ select:
     initial_option: manual
     restore_value: true
     optimistic: true
+    on_value:
+      - homeassistant.event:
+          event: esphome.coop_assistant_automatic_door
+          data:
+            status: !lambda 'return "Door mode changed to " + id(door_mode).state;'
+            device: !lambda 'return get_mac_address();'
 
 number:
   - platform: template
@@ -300,11 +330,6 @@ cover:
     open_duration: 50s
     open_moving_current_threshold: 0.015
     open_obstacle_current_threshold: 0.060
-    on_open:
-      - homeassistant.event:
-          event: esphome.coop_assistant_door
-          data:
-            status: Door Opened
     close_sensor: ads1115_ch0
     close_action:
       - logger.log: "Bed time for the nuggets!!!"
@@ -315,11 +340,6 @@ cover:
     close_duration: 50s
     close_moving_current_threshold: 0.015
     close_obstacle_current_threshold: 0.060
-    on_closed:
-      - homeassistant.event:
-          event: esphome.coop_assistant_door
-          data:
-            status: Door Closed
     stop_action:
       - output.set_level:
           id: motor_pwm
@@ -342,15 +362,14 @@ interval:
             - lambda: |-
                 return id(illuminance).state > id(door_set_point).state;
         then:
-          - globals.set:
-              id: auto_open_armed
-              value: 'false'
+          - script.execute: auto_open_disarm
           - homeassistant.event:
-              event: esphome.coop_assistant_door
+              event: esphome.coop_assistant_automatic_door
               data:
-                status: Armed door opened
+                status: "Open Armed Door"
+                device: !lambda 'return get_mac_address();'
+          - logger.log: "Open Armed Door"
           - cover.open: chicken_door
-          - logger.log: "Armed door was automatically opened."
 
   - interval: 60s
     then:
@@ -364,12 +383,67 @@ interval:
             - lambda: |-
                 return id(illuminance).state < id(door_set_point).state;
         then:
-          - globals.set:
-              id: auto_close_armed
-              value: 'false'
+          - script.execute: auto_close_disarm
           - homeassistant.event:
-              event: esphome.coop_assistant_door
+              event: esphome.coop_assistant_automatic_door
               data:
-                status: Armed door closed
+                status: "Close Armed Door"
+                device: !lambda 'return get_mac_address();'
+          - logger.log: "Close Armed Door"
           - cover.close: chicken_door
-          - logger.log: "Armed door was automatically closed."
+          
+script:
+  - id: auto_open_arm
+    then:
+      - if:
+          condition:
+            - lambda: 'return id(auto_close_armed);'
+          then:
+            - script.execute: auto_close_disarm
+      - globals.set:
+          id: auto_open_armed
+          value: 'true'
+      - logger.log: "Automatic Open Armed"
+      - homeassistant.event:
+          event: esphome.coop_assistant_automatic_door
+          data:
+            status: "Automatic Open Armed"
+            device: !lambda 'return get_mac_address();'
+  - id: auto_open_disarm
+    then:
+      - globals.set:
+          id: auto_open_armed
+          value: 'false'
+      - logger.log: "Automatic Open Disarmed"
+      - homeassistant.event:
+          event: esphome.coop_assistant_automatic_door
+          data:
+            status: "Automatic Open Disarmed"
+            device: !lambda 'return get_mac_address();'
+  - id: auto_close_arm
+    then:
+      - if:
+          condition:
+            - lambda: 'return id(auto_open_armed);'
+          then:
+            - script.execute: auto_open_disarm
+      - globals.set:
+          id: auto_close_armed
+          value: 'true'
+      - logger.log: "Automatic Close Armed"
+      - homeassistant.event:
+          event: esphome.coop_assistant_automatic_door
+          data:
+            status: "Automatic Close Armed"
+            device: !lambda 'return get_mac_address();'
+  - id: auto_close_disarm
+    then:
+      - globals.set:
+          id: auto_close_armed
+          value: 'false'
+      - logger.log: "Automatic Close Disarmed"
+      - homeassistant.event:
+          event: esphome.coop_assistant_automatic_door
+          data:
+            status: "Automatic Close Disarmed"
+            device: !lambda 'return get_mac_address();'
