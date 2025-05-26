@@ -12,18 +12,15 @@
 
 esphome:
   name: coop-assistant
-  platform: ESP8266
-  board: nodemcuv2
-  esp8266_restore_from_flash: true
-  
-  includes:
-    - veml7700_sensor.h
   
   libraries:
     - "Wire"
     - "SPI"
     - "Adafruit BusIO"
-    - "https://github.com/MojaveTom/Adafruit_VEML7700"
+
+esp8266:
+  board: nodemcuv2
+  restore_from_flash: true
 
 # Enable logging
 logger:
@@ -52,12 +49,13 @@ api:
         - script.execute: auto_close_disarm
 
 ota:
+  platform: esphome
   password: !secret ota_pass 
 
 wifi:
   ssid: !secret wifi_ssid
-  password: !secret wifi_pass
-  use_address: 10.0.101.91
+  password: !secret wifi_password
+  use_address: 10.0.101.123
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
@@ -86,8 +84,10 @@ globals:
     initial_value: "false"
     
 time:
-  - platform: sntp
-    timezone: "America/Chicago"
+  - platform: homeassistant
+    id: ha_time
+    timezone: 'America/Chicago'
+    
     on_time_sync:
       then:
         - logger.log: "Synchronized system clock"
@@ -100,7 +100,7 @@ time:
         then:
           - if:
               condition:
-                lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+                lambda: 'return id(door_mode).state == "automatic";'
               then:
                 - script.execute: auto_open_arm
               
@@ -112,7 +112,7 @@ time:
           - if:
               condition:
                 and:
-                  - lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+                  - lambda: 'return id(door_mode).state == "automatic";'
                   - lambda: 'return id(auto_open_armed) == true;'
               then:
                 - script.execute: auto_open_disarm
@@ -130,7 +130,7 @@ time:
         then:
           - if:
               condition:
-                lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+                lambda: 'return id(door_mode).state == "automatic";'
               then:
                 - script.execute: auto_close_arm
 
@@ -142,7 +142,7 @@ time:
           - if:
               condition:
                 and:
-                  - lambda: 'return strcmp(id(door_mode).state.c_str(),"automatic");'
+                  - lambda: 'return id(door_mode).state == "automatic";'
                   - lambda: 'return id(auto_close_armed) == true;'
               then:
                 - script.execute: auto_close_disarm
@@ -233,20 +233,16 @@ sensor:
       id: "humidity"
     update_interval: 60s
   
-  - platform: custom
-    lambda: |-
-      auto veml7700 = new VEML7700Sensor();
-      App.register_component(veml7700);
-      return {veml7700->lux_sensor, veml7700->als_sensor};
-    sensors:
-    - name: "Coop Illuminance"
-      id: 'illuminance'
-      unit_of_measurement: Lux
-      accuracy_decimals: 1
-    - name: "Coop Illuminance (ALS)"
-      unit_of_measurement: raw
-      accuracy_decimals: 0
-      internal: true
+  - platform: veml7700
+    address: 0x10
+    update_interval: 30s
+    gain: 1X
+    integration_time: 100ms
+    glass_attenuation_factor: 1.0
+    ambient_light:
+      id: ambient_light
+      name: "Ambient light"
+    
           
   - platform: ads1115
     multiplexer: 'A0_GND'
@@ -327,9 +323,9 @@ cover:
           id: motor_pwm
           level: 20%
       - output.turn_on: motor_drive_enable
-    open_duration: 50s
-    open_moving_current_threshold: 0.015
-    open_obstacle_current_threshold: 0.060
+    open_duration: 60s
+    open_moving_current_threshold: 0.005
+    open_obstacle_current_threshold: 0.100
     close_sensor: ads1115_ch0
     close_action:
       - logger.log: "Bed time for the nuggets!!!"
@@ -337,9 +333,9 @@ cover:
           id: motor_pwm
           level: 80%
       - output.turn_on: motor_drive_enable
-    close_duration: 50s
-    close_moving_current_threshold: 0.015
-    close_obstacle_current_threshold: 0.060
+    close_duration: 60s
+    close_moving_current_threshold: 0.005
+    close_obstacle_current_threshold: 0.100
     stop_action:
       - output.set_level:
           id: motor_pwm
@@ -347,6 +343,7 @@ cover:
       - output.turn_off: motor_drive_enable
     max_duration: 180s
     start_sensing_delay: 5s
+    obstacle_rollback: 15%
     
 # Each minute, run checks for automatic door open/close
 interval:
@@ -360,7 +357,7 @@ interval:
             - lambda: |-
                 return id(auto_open_armed);
             - lambda: |-
-                return id(illuminance).state > id(door_set_point).state;
+                return id(ambient_light).state > id(door_set_point).state;
         then:
           - script.execute: auto_open_disarm
           - homeassistant.event:
@@ -381,7 +378,7 @@ interval:
             - lambda: |-
                 return id(auto_close_armed);
             - lambda: |-
-                return id(illuminance).state < id(door_set_point).state;
+                return id(ambient_light).state < id(door_set_point).state;
         then:
           - script.execute: auto_close_disarm
           - homeassistant.event:
