@@ -10,3 +10,5 @@ The Coop Assistant project has the following features:
   * Home Assistant can be used to configure manual operation of the chicken door, or automatic mode can be used to determine the lighting level when the door should be opened or closed.
 * Output for connecting a 12V LED strip for coop lighting
 * Inputs for connecting switches for manual Open/Close/Stop operations
+
+See https://github.com/jeremy-meier/coop-assistant for additional documentation.
